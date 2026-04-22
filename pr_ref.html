@@ -87,7 +87,8 @@
             text-align: left; 
             vertical-align: top; 
             width: 50%; 
-            white-space: pre-wrap; 
+            white-space: pre-wrap; /* 確保預覽時也能顯示段落開頭的空格縮排 */
+            tab-size: 4; /* 設定網頁預覽的 Tab 寬度 */
         }
         #preview th { 
             background-color: #f7f9fa; 
@@ -99,16 +100,16 @@
 
 <div class="container">
     <h2>📄 政府新聞稿一鍵 Word 排版工具</h2>
-    <p class="subtitle">支援各類政府新聞公報及部門網頁</p>
+    <p class="subtitle">支援 info.gov.hk 及各大政府部門 (如 tlb.gov.hk) 的新聞稿</p>
     
     <div class="input-group">
         <label>中文新聞稿網址：</label>
-        <input type="text" id="zhUrl" value="https://www.info.gov.hk/gia/general/202603/15/P2026031300594.htm?fontSize=1" placeholder="請貼上中文網址">
+        <input type="text" id="zhUrl" value="https://www.tlb.gov.hk/tc/legislative/transport/replies/2025/20251022c.html" placeholder="例如: https://www.info.gov.hk/... 或 https://www.tlb.gov.hk/...">
     </div>
     
     <div class="input-group">
         <label>英文新聞稿網址：</label>
-        <input type="text" id="enUrl" value="https://www.info.gov.hk/gia/general/202603/15/P2026031300569.htm?fontSize=1" placeholder="請貼上英文網址">
+        <input type="text" id="enUrl" value="https://www.tlb.gov.hk/eng/legislative/transport/replies/2025/20251022c.html" placeholder="例如: https://www.info.gov.hk/... 或 https://www.tlb.gov.hk/...">
     </div>
 
     <button id="convertBtn" onclick="processUrls()">📥 獲取內容並下載 Word (DOCX)</button>
@@ -126,128 +127,284 @@
 </div>
 
 <script>
+    // 利用免費代理繞過瀏覽器跨區限制，加入備用代理機制
     async function fetchContent(url) {
         let htmlStr = null;
-        const targetUrl = url.split('?')[0] + `?t=${Date.now()}`;
-
+        
+        // 定義多個免費代理伺服器，自動輪詢以增加成功率
         const proxies = [
-            { url: `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`, type: 'json' },
-            { url: `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`, type: 'text' },
-            { url: `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`, type: 'text' }
+            { url: `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, type: 'text' },
+            { url: `https://corsproxy.io/?${encodeURIComponent(url)}`, type: 'text' },
+            { url: `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`, type: 'json' }
         ];
 
         for (const proxy of proxies) {
             try {
                 console.log(`正在嘗試代理: ${proxy.url}`);
                 const response = await fetch(proxy.url);
+                
                 if (response.ok) {
-                    htmlStr = (proxy.type === 'json') ? (await response.json()).contents : await response.text();
-                    if (htmlStr && (htmlStr.includes('pressrelease') || htmlStr.includes('GIA') || htmlStr.length > 2000)) break;
+                    if (proxy.type === 'json') {
+                        const data = await response.json();
+                        htmlStr = data.contents;
+                    } else {
+                        htmlStr = await response.text();
+                    }
+                    
+                    if (htmlStr && htmlStr.length > 500) {
+                        console.log('代理連線成功！');
+                        break; 
+                    }
                 }
-            } catch (e) { console.warn("代理失敗:", e.message); }
-        }
-
-        if (!htmlStr) throw new Error('無法抓取網頁內容，請檢查網址或稍後再試。');
-        
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(htmlStr, "text/html");
-        
-        let pageTitle = doc.title || "";
-        pageTitle = pageTitle.replace(/(\s*[-|]\s*)?(Press Releases|The Government of the HKSAR|香港特別行政區政府新聞公報|新聞公報).*$/i, "").trim();
-
-        function extractText(node) {
-            if (!node) return "";
-            let text = "";
-            for (let child of node.childNodes) {
-                if (child.nodeType === 3) text += child.nodeValue;
-                else if (child.nodeType === 1) {
-                    const tag = child.tagName.toLowerCase();
-                    if (tag === "br") text += "\n";
-                    else if (["p", "div", "h1", "h2", "h3"].includes(tag)) text += "\n" + extractText(child) + "\n";
-                    else text += extractText(child);
-                }
+            } catch (e) {
+                console.warn(`代理失敗: ${proxy.url}`, e);
             }
-            return text;
         }
 
-        const bodyNode = doc.getElementById("pressrelease") || doc.querySelector(".pressrelease") || doc.querySelector("#content") || doc.body;
-        const fullText = extractText(bodyNode);
-        const paras = fullText.split('\n').map(p => p.trimEnd()).filter(p => p.trim().length > 0);
+        if (!htmlStr || htmlStr.length < 500) {
+            throw new Error('所有代理伺服器都無法連線或抓取不到有效內容');
+        }
         
-        return { title: pageTitle, paras: paras };
+        try {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(htmlStr, "text/html");
+            
+            let pageTitle = doc.title || "";
+            pageTitle = pageTitle.replace(/(\s*[-|]\s*)?(Press Releases|The Government of the Hong Kong Special Administrative Region|香港特別行政區政府新聞公報|新聞公報|香港特别行政区政府新闻公报|Transport and Logistics Bureau|運輸及物流局).*$/i, "").trim();
+
+            function extractTextWithNewlines(node) {
+                if (!node) return "";
+                let text = "";
+                for (let child of node.childNodes) {
+                    if (child.nodeType === Node.TEXT_NODE) {
+                        text += child.nodeValue;
+                    } else if (child.nodeType === Node.ELEMENT_NODE) {
+                        const tagName = child.tagName.toLowerCase();
+                        if (tagName === "br") {
+                            text += "\n";
+                        } else if (tagName === "p" || tagName === "div" || tagName === "h1" || tagName === "h2") {
+                            text += "\n" + extractTextWithNewlines(child) + "\n";
+                        } else {
+                            text += extractTextWithNewlines(child);
+                        }
+                    }
+                }
+                return text;
+            }
+            
+            const prTitleNode = doc.getElementById("pr_title") || doc.querySelector("h1");
+            let bodyNode = doc.getElementById("pressrelease") || 
+                           doc.querySelector(".pressrelease") ||
+                           doc.getElementById("content") ||
+                           doc.querySelector("#main") ||
+                           doc.querySelector("main") ||
+                           doc.querySelector(".content");
+            
+            if (!bodyNode) {
+                const junk = doc.querySelectorAll("script, style, nav, header, footer, aside, .menu, #menu, .sidebar, #sidebar, iframe, noscript");
+                junk.forEach(el => el.remove());
+                bodyNode = doc.body;
+            }
+
+            let fullText = "";
+            
+            if (prTitleNode && !bodyNode.contains(prTitleNode)) {
+                fullText += extractTextWithNewlines(prTitleNode) + "\n";
+            }
+            fullText += extractTextWithNewlines(bodyNode);
+            
+            // 按換行切割段落。改用 trim() 將所有不規則的空白清空，確保稍後可以統一加入標準的 Tab
+            let paras = fullText.split('\n')
+                .map(p => p.trim())
+                .filter(p => p.length > 0);
+            
+            return { title: pageTitle, paras: paras };
+
+        } catch (error) {
+            console.error("解析錯誤:", error);
+            throw new Error("成功抓取網頁，但解析內容失敗");
+        }
     }
 
+    // 主要處理功能
     async function processUrls() {
         const zhUrl = document.getElementById('zhUrl').value.trim();
         const enUrl = document.getElementById('enUrl').value.trim();
         const statusLabel = document.getElementById('status');
         const btn = document.getElementById('convertBtn');
+        const previewTable = document.getElementById('preview');
         const previewBody = document.getElementById('previewBody');
 
-        if (!zhUrl || !enUrl) { statusLabel.innerText = "⚠️ 請輸入中英文網址"; return; }
+        if (!zhUrl || !enUrl) {
+            statusLabel.style.color = "#e74c3c";
+            statusLabel.innerText = "⚠️ 請填寫晒中英文兩條網址！";
+            return;
+        }
 
         try {
             btn.disabled = true;
-            statusLabel.innerText = "⏳ 正在抓取資料...";
-            const [zhData, enData] = await Promise.all([fetchContent(zhUrl), fetchContent(enUrl)]);
+            statusLabel.style.color = "#2980b9";
+            statusLabel.innerText = "⏳ 正在跨網為你抓取資料，請稍候幾秒...";
+            previewTable.style.display = "none";
+            previewBody.innerHTML = "";
 
-            // 智能識別真實標題
-            let realZhTitle = zhData.paras.find(p => p.match(/立法會.+題/)) || zhData.title;
-            let realEnTitle = enData.paras.find(p => p.match(/LCQ\d+/i)) || enData.title;
+            const [zhData, enData] = await Promise.all([
+                fetchContent(zhUrl),
+                fetchContent(enUrl)
+            ]);
 
-            // 改良版清理邏輯：只清理開頭的元數據，遇到第一個長句（正文）就停止
-            function cleanMetadata(paras, titleStr) {
+            if (zhData.paras.length === 0 || enData.paras.length === 0) {
+                statusLabel.style.color = "#e74c3c";
+                statusLabel.innerText = "❌ 搵唔到新聞稿正文，請確定網址正不正確。";
+                btn.disabled = false;
+                return;
+            }
+
+            statusLabel.style.color = "#27ae60";
+            statusLabel.innerText = "✅ 成功讀取內容！正在幫你畫格仔同匯出 Word...";
+
+            let realEnTitle = enData.title; 
+            let realZhTitle = zhData.title;
+
+            const foundEnTitle = enData.paras.find(p => p.match(/LCQ\d+\s*:/i));
+            if (foundEnTitle) realEnTitle = foundEnTitle;
+
+            const foundZhTitle = zhData.paras.find(p => p.match(/立法會.+題\s*[：:]/));
+            if (foundZhTitle) realZhTitle = foundZhTitle;
+
+            let docTitle = realEnTitle || "中英對照新聞稿";
+            docTitle = docTitle.replace(/[\\/:*?"<>|]/g, "_").trim();
+            if (docTitle.length > 120) docTitle = docTitle.substring(0, 120).trim();
+
+            function cleanTopParas(paras, titleStr, isZh) {
                 let startIdx = 0;
-                for (let i = 0; i < Math.min(10, paras.length); i++) {
+                for(let i = 0; i < Math.min(15, paras.length); i++) {
                     const p = paras[i];
-                    const isStars = p.replace(/\s/g, '').includes('***') || p.replace(/\s/g, '').includes('＊＊＊');
-                    const isDate = p.match(/\d{4}年\d{1,2}月\d{1,2}日/) || p.match(/(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)/i);
-                    const isTitle = titleStr && p.includes(titleStr.substring(0, 10));
+                    const isStars = p.replace(/\s/g, '').split('*').length > 4 || p.replace(/\s/g, '').split('＊').length > 4;
+                    const isTitleMatch = titleStr && titleStr.length > 5 && (p.includes(titleStr) || titleStr.includes(p));
+                    const isSpecificFormat = isZh ? p.match(/立法會.+題\s*[：:]/) : p.match(/LCQ\d+\s*:/i);
+                    const isDateOrMeta = p.match(/(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+[a-zA-Z]+/i) || p.match(/^\d{4}年\d{1,2}月\d{1,2}日/);
                     
-                    if (isStars || isDate || isTitle || p.length < 5) startIdx = i + 1;
-                    else break; // 遇到正常段落就停止清理
+                    if (isStars || isTitleMatch || isSpecificFormat || isDateOrMeta) {
+                        startIdx = i + 1; 
+                    }
                 }
                 return paras.slice(startIdx);
             }
 
-            const finalZh = [realZhTitle, "＊＊＊＊＊＊＊＊＊＊＊＊＊＊＊＊＊＊＊", "網頁連結：" + zhUrl, ...cleanMetadata(zhData.paras, realZhTitle)];
-            const finalEn = [realEnTitle, "********************************************", "Website URL: " + enUrl, ...cleanMetadata(enData.paras, realEnTitle)];
+            let cleanedZhParas = cleanTopParas(zhData.paras, realZhTitle, true);
+            let cleanedEnParas = cleanTopParas(enData.paras, realEnTitle, false);
 
-            const maxLen = Math.max(finalZh.length, finalEn.length);
-            previewBody.innerHTML = "";
+            const zhStars = "＊＊＊＊＊＊＊＊＊＊＊＊＊＊＊＊＊＊＊";
+            const enStars = "********************************************";
+
+            // 合併：[真實標題, 星號分隔線, 原始網址, 真正的正文 (每一段前面強制加入 \t Tab字元)]
+            const finalZhParas = [realZhTitle, zhStars, "網頁連結：" + zhUrl, ...cleanedZhParas.map(p => "\t" + p)];
+            const finalEnParas = [realEnTitle, enStars, "Website URL: " + enUrl, ...cleanedEnParas.map(p => "\t" + p)];
+
+            const maxLen = Math.max(finalZhParas.length, finalEnParas.length);
             for (let i = 0; i < maxLen; i++) {
                 const tr = document.createElement("tr");
-                tr.innerHTML = `<td>${finalZh[i] || ""}</td><td>${finalEn[i] || ""}</td>`;
+                const tdZh = document.createElement("td");
+                tdZh.innerText = finalZhParas[i] || "";
+                const tdEn = document.createElement("td");
+                tdEn.innerText = finalEnParas[i] || "";
+                tr.appendChild(tdZh);
+                tr.appendChild(tdEn);
                 previewBody.appendChild(tr);
             }
-            document.getElementById('preview').style.display = "table";
+            previewTable.style.display = "table";
 
-            generateDocx(finalZh, finalEn, maxLen, realEnTitle.replace(/[\\/:*?"<>|]/g, "_"));
-            statusLabel.innerText = "🎉 成功！Word 檔案已下載。";
+            // 生成並下載 DOCX 檔案
+            generateDocx(finalZhParas, finalEnParas, maxLen, docTitle);
+            
+            setTimeout(() => {
+                statusLabel.innerText = "🎉 大功告成！Word 檔案已經彈出下載。";
+            }, 1000);
+
         } catch (error) {
-            statusLabel.innerText = "❌ 錯誤: " + error.message;
-        } finally { btn.disabled = false; }
+            statusLabel.style.color = "#e74c3c";
+            statusLabel.innerText = `❌ 發生錯誤：${error.message} (可能網址無效或被防火牆阻擋)`;
+        } finally {
+            btn.disabled = false;
+        }
     }
 
+    // 將段落砌成 Word 雙列表格
     function generateDocx(zhParas, enParas, maxLen, docTitle) {
-        const rows = [];
+        const tableRows = [];
+        
+        // 專門處理帶有 Tab (\t) 的段落，確保 Word 正確識別為真正的製表符
+        const createParagraph = (text) => {
+            if (text.startsWith('\t')) {
+                return new docx.Paragraph({
+                    children: [
+                        new docx.TextRun("\t"), // 加入原生的 Tab 符號
+                        new docx.TextRun(text.substring(1)) // 接續剩下的文字
+                    ]
+                });
+            }
+            // 如果沒有 Tab（例如標題和星號線），就正常輸出
+            return new docx.Paragraph({ text: text });
+        };
+        
         for (let i = 0; i < maxLen; i++) {
-            rows.push(new docx.TableRow({
-                children: [
-                    new docx.TableCell({ children: [new docx.Paragraph({ text: zhParas[i] || "" }), new docx.Paragraph("")], width: { size: 50, type: docx.WidthType.PERCENTAGE } }),
-                    new docx.TableCell({ children: [new docx.Paragraph({ text: enParas[i] || "" }), new docx.Paragraph("")], width: { size: 50, type: docx.WidthType.PERCENTAGE } })
-                ]
-            }));
+            const zhText = zhParas[i] || "";
+            const enText = enParas[i] || "";
+            
+            tableRows.push(
+                new docx.TableRow({
+                    children: [
+                        new docx.TableCell({
+                            width: { size: 50, type: docx.WidthType.PERCENTAGE },
+                            // 要求 2: 每段完結後加多一行空行
+                            children: [createParagraph(zhText), new docx.Paragraph({ text: "" })],
+                        }),
+                        new docx.TableCell({
+                            width: { size: 50, type: docx.WidthType.PERCENTAGE },
+                            // 要求 2: 每段完結後加多一行空行
+                            children: [createParagraph(enText), new docx.Paragraph({ text: "" })],
+                        }),
+                    ],
+                })
+            );
         }
 
         const doc = new docx.Document({
             sections: [{
-                properties: { page: { margin: { top: 567, bottom: 567, left: 567, right: 567 } } },
-                children: [new docx.Table({ width: { size: 100, type: docx.WidthType.PERCENTAGE }, borders: docx.TableBorders.NONE, rows: rows })]
-            }]
+                // 要求 1: 版面設定邊界是上、下、左、右各 1cm (1cm 約為 567 twips)
+                properties: {
+                    page: {
+                        margin: {
+                            top: 567,
+                            bottom: 567,
+                            left: 567,
+                            right: 567,
+                        },
+                    },
+                },
+                children: [
+                    new docx.Table({
+                        width: { size: 100, type: docx.WidthType.PERCENTAGE },
+                        // 要求 3: 表格框線全部用透明
+                        borders: {
+                            top: { style: docx.BorderStyle.NONE },
+                            bottom: { style: docx.BorderStyle.NONE },
+                            left: { style: docx.BorderStyle.NONE },
+                            right: { style: docx.BorderStyle.NONE },
+                            insideHorizontal: { style: docx.BorderStyle.NONE },
+                            insideVertical: { style: docx.BorderStyle.NONE },
+                        },
+                        rows: tableRows,
+                    }),
+                ],
+            }],
         });
 
-        docx.Packer.toBlob(doc).then(blob => saveAs(blob, `${docTitle}.docx`));
+        // 觸發下載
+        docx.Packer.toBlob(doc).then(blob => {
+            saveAs(blob, `${docTitle}.docx`);
+        });
     }
 </script>
 </body>
